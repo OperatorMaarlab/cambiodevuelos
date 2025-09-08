@@ -402,6 +402,16 @@
           <label>1 EUR = USD <input id="fxUSD" value="1.08"></label>
           <label>1 EUR = MXN <input id="fxMXN" value="19.00"></label>
         </div>
+
+        <!-- NUEVO: Conexión a tu backend de aeropuertos -->
+        <div class="row" style="margin-top:8px">
+          <label>Airports API (base URL)
+            <input id="airportsBase" placeholder="https://api.maarlab.com/v1/catalog/airports">
+          </label>
+          <label>Airports API Key (opcional)
+            <input id="airportsKey" placeholder="Bearer xxx...">
+          </label>
+        </div>
       </details>
     </aside>
   </main>
@@ -443,17 +453,13 @@
   };
   var LANG="es", CUR="EUR";
   var MODE = "quote"; // "quote" | "confirm"
-  var W = {
-    es:{confTitle:"Confirmación de cambio", totQuote:"Total a pagar", totConf:"Total pagado", seal:"CONFIRMADO"},
-    en:{confTitle:"Change confirmation",  totQuote:"Total due",     totConf:"Total paid",   seal:"CONFIRMED"},
-    fr:{confTitle:"Confirmation de changement", totQuote:"Total à payer", totConf:"Total payé", seal:"CONFIRMÉ"},
-    it:{confTitle:"Conferma di cambio", totQuote:"Totale da pagare", totConf:"Totale pagato", seal:"CONFERMATO"},
-    de:{confTitle:"Änderungsbestätigung", totQuote:"Gesamt fällig",  totConf:"Gesamt bezahlt", seal:"BESTÄTIGT"}
-  };
 
   /* ===== datos ===== */
   var DEFAULT_AIRLINE_BASE = "https://maarlabcdnstorage.blob.core.windows.net/web-assets/images/airlines";
   var DEFAULT_MAARLAB_MARK = "https://cdn.theorg.com/5a5ab266-2e99-4c2f-9c04-fe46304ee4fc_thumb.jpg";
+
+  /* NUEVO: base de aeropuertos remota por defecto (ajústala a tu API) */
+  var DEFAULT_AIRPORTS_BASE = "https://api.maarlab.com/v1/catalog/airports";
 
   /* Aerolíneas (incluye fallback F8→F9 y U→U2) */
   var AIRLINES = {
@@ -469,7 +475,7 @@
   };
   var LOGO_FALLBACK = {"F8":"F9","U":"U2"};
 
-  /* IATA → ciudad cargado desde airports.json */
+  /* IATA → ciudad (solo en RAM, sin persistencia) */
   var IATA_DB = {}; var IATA_READY = false;
 
   var hotelLogoData = "";
@@ -525,7 +531,7 @@
 
     setLegLogo("logo-"+prefix, code);
 
-    var $b=$(prefix+"Badges"); if($b) $b.innerHTML=""; // ya no usamos badges de duración/tz
+    var $b=$(prefix+"Badges"); if($b) $b.innerHTML="";
 
     var $t=$(prefix+"Times"); $t.innerHTML="";
     function cell(lbl,val){ var w=document.createElement("div"); var l=document.createElement("div"); l.className="tiny"; l.textContent=lbl; var v=document.createElement("div"); v.className="big"; v.textContent=val||"--:--"; w.appendChild(l); w.appendChild(v); return w; }
@@ -555,8 +561,8 @@
   }
 
   function applyI18n(){
-    var S = STR[LANG], M = W[LANG] || W.es;
-    $("hdr-title").textContent = (MODE === "confirm") ? M.confTitle : S.hdrTitle;
+    var S = STR[LANG];
+    $("hdr-title").textContent = (MODE === "confirm") ? {es:"Confirmación de cambio",en:"Change confirmation",fr:"Confirmation de changement",it:"Conferma di cambio",de:"Änderungsbestätigung"}[LANG] : S.hdrTitle;
     $("hdr-sub").textContent   = S.hdrSub;
     $("prevTitle").textContent = S.prev;
     $("newTitle").textContent  = S.next;
@@ -564,10 +570,8 @@
     $("langLbl").textContent = LANG==="en"?"Language":LANG==="fr"?"Langue":LANG==="it"?"Lingua":LANG==="de"?"Sprache":"Idioma";
     var badgeText = (MODE==="confirm") ? S.badgeMode.confirm : S.badgeMode.quote;
     if ($("modeBadge")) $("modeBadge").textContent = badgeText;
-
-    $("totLabel").textContent = (MODE==="confirm") ? W[LANG].totConf : W[LANG].totQuote;
-
-    var wm = $("wm"); if(wm){ wm.dataset.text = (MODE==="confirm") ? (W[LANG].seal || "CONFIRMADO") : ""; wm.classList.toggle("show", MODE==="confirm"); }
+    $("totLabel").textContent = (MODE==="confirm") ? {es:"Total pagado",en:"Total paid",fr:"Total payé",it:"Totale pagato",de:"Gesamt bezahlt"}[LANG] : {es:"Total a pagar",en:"Total due",fr:"Total à payer",it:"Totale da pagare",de:"Gesamt fällig"}[LANG];
+    var wm = $("wm"); if(wm){ wm.dataset.text = (MODE==="confirm") ? ({es:"CONFIRMADO",en:"CONFIRMED",fr:"CONFIRMÉ",it:"CONFERMATO",de:"BESTÄTIGT"}[LANG]||"CONFIRMADO") : ""; wm.classList.toggle("show", MODE==="confirm"); }
     refresh();
   }
 
@@ -644,6 +648,102 @@
     });
   }
 
+  // ======= Conexión con tu backend de aeropuertos (sin caché persistente) =======
+  function getAirportsBase(){
+    var base = ($("airportsBase") && $("airportsBase").value) ? $("airportsBase").value : DEFAULT_AIRPORTS_BASE;
+    return (base||"").replace(/\/$/,"");
+  }
+  function getAirportsHeaders(){
+    var key = ($("airportsKey") && $("airportsKey").value) ? $("airportsKey").value.trim() : "";
+    var h = {"Accept":"application/json","Cache-Control":"no-store"};
+    if(key){ h["Authorization"] = key.startsWith("Bearer ") ? key : ("Bearer "+key); }
+    return h;
+  }
+
+  // Normaliza cualquier respuesta a { IATA: "Ciudad" }
+  function normalizeAirportsPayload(payload){
+    var map = {};
+    if(Array.isArray(payload)){
+      payload.forEach(function(a){
+        var code = normalizeCode(a.iata || a.code || a.IATA || a.Code);
+        var city = a.city || a.City || a.municipality || a.name || a.label || "";
+        if(code && city) map[code]=city;
+      });
+    }else if(payload && typeof payload === "object"){
+      // Puede venir ya como {MAD:"Madrid", ...} o como { items:[...] }
+      if(payload.items && Array.isArray(payload.items)){
+        payload.items.forEach(function(a){
+          var code = normalizeCode(a.iata || a.code || a.IATA || a.Code);
+          var city = a.city || a.City || a.municipality || a.name || a.label || "";
+          if(code && city) map[code]=city;
+        });
+      }else{
+        Object.keys(payload).forEach(function(k){
+          var code = normalizeCode(k);
+          var city = payload[k];
+          if(code && city) map[code]=String(city);
+        });
+      }
+    }
+    return map;
+  }
+
+  // Carga catálogo (sin cache persistente; cache busting en URL y cache:no-store)
+  function loadIataDb(){
+    var base = getAirportsBase();
+    if(!base){ IATA_DB={}; IATA_READY=false; populateIataDatalist(); refresh(); return; }
+
+    var url = base + (base.includes("?") ? "&" : "?") + "_ts=" + Date.now();
+    fetch(url, {method:"GET", headers:getAirportsHeaders(), cache:"no-store"})
+      .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
+      .then(function(payload){
+        IATA_DB = normalizeAirportsPayload(payload) || {};
+        IATA_READY = Object.keys(IATA_DB).length>0;
+        populateIataDatalist();
+        refresh();
+      })
+      .catch(function(err){
+        console.warn("No se pudo cargar Airports API:", err);
+        // Fallback mínimo para no romper UX (sin persistir)
+        IATA_DB = {
+          "MAD":"Madrid","BCN":"Barcelona","AGP":"Málaga","VLC":"Valencia","SVQ":"Sevilla",
+          "PMI":"Palma de Mallorca","IBZ":"Ibiza","ALC":"Alicante",
+          "TFN":"Tenerife Norte","TFS":"Tenerife Sur","LPA":"Las Palmas (Gran Canaria)","SPC":"La Palma","BIO":"Bilbao",
+          "LIS":"Lisboa","CDG":"París (Charles de Gaulle)","ORY":"París (Orly)","FRA":"Fráncfort","AMS":"Ámsterdam",
+          "HEL":"Helsinki","LHR":"Londres (Heathrow)","LGW":"Londres (Gatwick)","LTN":"Luton","STN":"Stansted","EMA":"East Midlands","LPL":"Liverpool",
+          "MEX":"Ciudad de México","NLU":"Felipe Ángeles (CDMX)","GDL":"Guadalajara","MTY":"Monterrey",
+          "CUN":"Cancún","TQO":"Tulum (Felipe Carrillo Puerto)","CZM":"Cozumel","HUX":"Huatulco","PVR":"Puerto Vallarta","ACA":"Acapulco",
+          "DFW":"Dallas/Fort Worth","EWR":"Newark","JFK":"Nueva York (JFK)","LAX":"Los Ángeles","SFO":"San Francisco"
+        };
+        IATA_READY = true;
+        populateIataDatalist();
+        refresh();
+      });
+  }
+
+  // Lookup puntual por código si el catálogo cargado no lo trae
+  function lookupAirportByCode(code){
+    var base = getAirportsBase();
+    if(!base || !code) return Promise.resolve(null);
+    var url = base.replace(/\/$/,"") + "/" + encodeURIComponent(code) + "?_ts=" + Date.now();
+    return fetch(url, {method:"GET", headers:getAirportsHeaders(), cache:"no-store"})
+      .then(function(r){ if(!r.ok) return null; return r.json(); })
+      .then(function(a){
+        if(!a) return null;
+        var city = a.city || a.City || a.municipality || a.name || a.label || "";
+        return city ? { code: normalizeCode(a.iata || a.code || code), city: city } : null;
+      })
+      .catch(function(){ return null; });
+  }
+
+  function populateAirlineDatalist(){ // redefinida arriba, aquí solo aseguramos que existe
+    var dlAir=$("airlineCodes"); if(!dlAir) return;
+    dlAir.innerHTML="";
+    Object.keys(AIRLINES).forEach(function(k){
+      var o=document.createElement("option"); o.value=k; o.label=AIRLINES[k]; dlAir.appendChild(o);
+    });
+  }
+
   function bindAll(){
     // Cambios de inputs (realtime)
     var inputs = document.querySelectorAll("#panel input, #panel select");
@@ -658,11 +758,22 @@
           var ok = (!el.value) || /^([01]\d|2[0-3]):[0-5]\d$/.test(el.value);
           el.classList.toggle("invalid", !ok);
         }
-        // Autocompletar ciudad desde IATA (cuando IATA_DB esté listo)
+        // Autocompletar ciudad desde IATA (consulta runtime si falta)
         var targetId = el.getAttribute("data-iata");
-        if(targetId && IATA_READY){
+        if(targetId){
           var cityEl=$(targetId), c=(el.value||"").toUpperCase().trim();
-          if(cityEl && c.length>=3 && IATA_DB[c]) cityEl.value = IATA_DB[c];
+          if(cityEl && c.length>=3){
+            if(IATA_READY && IATA_DB[c]){
+              cityEl.value = IATA_DB[c];
+            }else{
+              // lookup puntual sin persistencia
+              lookupAirportByCode(c).then(function(res){
+                if(res && cityEl && (($(el).value||"").toUpperCase().trim()===res.code)){
+                  cityEl.value = res.city;
+                }
+              });
+            }
+          }
         }
         refresh();
       };
@@ -718,37 +829,9 @@
     if($("airlineBase")) $("airlineBase").value = DEFAULT_AIRLINE_BASE;
     if($("maarlabLogoMTop")) $("maarlabLogoMTop").src = DEFAULT_MAARLAB_MARK;
     if($("maarlabLogoMCard")) $("maarlabLogoMCard").src = DEFAULT_MAARLAB_MARK;
+    if($("airportsBase")) $("airportsBase").value = DEFAULT_AIRPORTS_BASE;
 
     populateAirlineDatalist();
-  }
-
-  // Carga airports.json (misma carpeta del index)
-  function loadIataDb(){
-    fetch('airports.json')
-      .then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); })
-      .then(function(db){
-        IATA_DB = db || {};
-        IATA_READY = true;
-        populateIataDatalist();
-        refresh();
-      })
-      .catch(function(err){
-        console.warn("No se pudo cargar airports.json:", err);
-        // Fallback mínimo para no romper UX
-        IATA_DB = {
-          "MAD":"Madrid","BCN":"Barcelona","AGP":"Málaga","VLC":"Valencia","SVQ":"Sevilla",
-          "PMI":"Palma de Mallorca","IBZ":"Ibiza","ALC":"Alicante",
-          "TFN":"Tenerife Norte","TFS":"Tenerife Sur","LPA":"Las Palmas (Gran Canaria)","SPC":"La Palma","BIO":"Bilbao",
-          "LIS":"Lisboa","CDG":"París (Charles de Gaulle)","ORY":"París (Orly)","FRA":"Fráncfort","AMS":"Ámsterdam",
-          "HEL":"Helsinki","LHR":"Londres (Heathrow)","LGW":"Londres (Gatwick)","LTN":"Luton","STN":"Stansted","EMA":"East Midlands","LPL":"Liverpool",
-          "MEX":"Ciudad de México","NLU":"Felipe Ángeles (CDMX)","GDL":"Guadalajara","MTY":"Monterrey",
-          "CUN":"Cancún","TQO":"Tulum (Felipe Carrillo Puerto)","CZM":"Cozumel","HUX":"Huatulco","PVR":"Puerto Vallarta","ACA":"Acapulco",
-          "DFW":"Dallas/Fort Worth","EWR":"Newark","JFK":"Nueva York (JFK)","LAX":"Los Ángeles","SFO":"San Francisco"
-        };
-        IATA_READY = true;
-        populateIataDatalist();
-        refresh();
-      });
   }
 
   // Exponer refresh si hace falta llamarlo tras carga externa
@@ -757,8 +840,8 @@
   document.addEventListener("DOMContentLoaded", function(){
     try{
       bindAll();
-      loadIataDb();
-      applyI18n();  // llama a refresh()
+      loadIataDb();   // ← carga desde tu backend (sin cache persistente)
+      applyI18n();    // llama a refresh()
       refresh();
     }catch(e){
       console.error(e);
